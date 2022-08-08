@@ -1,0 +1,33 @@
+name: Build
+
+on:
+  push:
+    # branches: [ main, develop ]
+    paths-ignore: ["**.md", "docs/**"]
+  pull_request:
+    # branches: [ main, develop ]
+    paths-ignore: ["**.md", "docs/**"]
+  schedule:
+    - cron: '0 5 * * *'
+
+defaults:
+  run:
+    working-directory: ./
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Git clone repository
+        uses: actions/checkout@v2
+      - uses: Swatinem/rust-cache@v1
+      - name: Build
+        run: cargo build --release --verbose
+      - name: Run tests
+        run: cargo test --release --verbose
+      - name: Check formatting
+        run: cargo fmt -- --check
+
