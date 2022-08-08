@@ -1,4 +1,11 @@
-[TOC]
+
+- [Elliptic Curve Digital Signature Algorithm(ECDSA)](#elliptic-curve-digital-signature-algorithmecdsa)
+- [Operations](#operations)
+  - [KeyGen](#keygen)
+  - [Sign(Offline)](#signoffline)
+  - [Sign(Online)](#signonline)
+- [Messaging](#messaging)
+
 
 ## Elliptic Curve Digital Signature Algorithm(ECDSA)
 
@@ -44,7 +51,7 @@ pub struct Parameters {
 
 Each party owns $key_i = (sk_i, pk_i)$. The structure of the $key_i$ is as follows:
   
-```json
+```
 {
   // i
   "index": ...,
