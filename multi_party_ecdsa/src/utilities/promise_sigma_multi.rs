@@ -113,6 +113,7 @@ impl PromiseProof {
             });
         })
         .unwrap();
+
         let fr = expo_f(&q(), &group.gq.discriminant(), &into_mpz(&sm));
         let a2 = fr * pkr1;
 
@@ -189,17 +190,14 @@ impl PromiseProof {
         let mut c1k = c1.clone();
         let mut pkz2 = cl_pub_key.0.clone();
         let mut c2k = c2.clone();
+
         crossbeam::scope(|thread| {
             thread.spawn(|_| {
                 r2_left.pow(self.z2.clone());
-            });
-            thread.spawn(|_| {
                 c1k.pow(bigint_to_mpz(&e));
             });
             thread.spawn(|_| {
                 pkz2.pow(self.z2.clone());
-            });
-            thread.spawn(|_| {
                 c2k.pow(bigint_to_mpz(&e));
             });
         })

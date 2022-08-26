@@ -44,6 +44,14 @@ pub struct KeyGenMsgs {
     pub phase_five_msgs: HashMap<String, KeyGenPhaseFiveMsg>,
 }
 
+#[derive(Clone, Debug)]
+pub struct KeyGenMsgsFlag {
+    pub phase_one_two_msgs: u8,
+    pub phase_three_msgs: u8,
+    pub phase_four_msgs: u8,
+    pub phase_five_msgs: u8,
+}
+
 /// Key generation struct
 #[derive(Clone, Debug)]
 pub struct KeyGenPhase {
@@ -58,6 +66,7 @@ pub struct KeyGenPhase {
     pub share_private_key: FE,                 // x_i
     pub share_public_key: HashMap<String, GE>, // X_i
     pub msgs: KeyGenMsgs,
+    pub msgsf: KeyGenMsgsFlag,
     pub dlog_com: DlogCommitment,
     pub mutex: Arc<Mutex<usize>>,
 }
@@ -79,6 +88,17 @@ impl KeyGenMsgs {
         self.phase_four_vss_sending_msgs.clear();
         self.phase_four_msgs.clear();
         self.phase_five_msgs.clear();
+    }
+}
+
+impl KeyGenMsgsFlag {
+    pub fn new() -> Self {
+        Self {
+            phase_one_two_msgs: 0,
+            phase_three_msgs: 0,
+            phase_four_msgs: 0,
+            phase_five_msgs: 0,
+        }
     }
 }
 
@@ -132,6 +152,7 @@ impl KeyGenPhase {
             share_private_key, // Init share private key, compute later.
             share_public_key: HashMap::new(),
             msgs,
+            msgsf: KeyGenMsgsFlag::new(),
             dlog_com,
             mutex,
         })
@@ -198,6 +219,7 @@ impl KeyGenPhase {
             };
 
             if i == party_index {
+                msgs.phase_four_msgs.insert(i.clone(), msg.clone());
                 share_private_key = msg.secret_share.clone();
             }
             let phase_four_msg = MultiKeyGenMessage::PhaseFourMsg(msg);
@@ -301,7 +323,7 @@ impl KeyGenPhase {
         Ok(ret_string)
     }
 
-    /// Generate round1 message, output data and send mode (send, send_subset or broadcast)
+    /// Generate the first round message.
     pub fn process_begin(&mut self) -> Result<SendingMessages, anyhow::Error> {
         let lock = Arc::clone(&self.mutex);
         let _lock = lock.lock().unwrap();
@@ -312,13 +334,22 @@ impl KeyGenPhase {
             gp: GROUP_UPDATE_1827.gq.clone(),
             commitment: self.dlog_com.commitment.clone(),
         };
+        self.msgs
+            .phase_one_two_msgs
+            .insert(self.party_index.clone(), msg.clone());
+
         let sending_msg = MultiKeyGenMessage::PhaseOneTwoMsg(msg);
         let sending_msg_bytes = bincode::serialize(&sending_msg)
             .map_err(|why| format_err!("Serialize error in keygen process_begin, cause {}", why))?;
         return Ok(SendingMessages::BroadcastMessage(sending_msg_bytes));
     }
 
-    /// Handle message received and generate next round message, output data and send mode (send, send_subset or broadcast)
+    /// Handle message received and generate next round message.
+    /// Return a result or the message to be sent in the next round.
+    ///
+    /// When a message is received, the processing is as follows:
+    ///   If this message already exists, do nothing; otherwise, insert it into the cache.
+    ///   When all the necessary messages have been received, generate the result or the next round of messages.
     pub fn msg_handler(
         &mut self,
         index: String,
@@ -341,9 +372,16 @@ impl KeyGenPhase {
             .unwrap();
         match msg {
             MultiKeyGenMessage::PhaseOneTwoMsg(msg) => {
-                self.msgs
-                    .phase_one_two_msgs
-                    .insert(index.clone(), msg.clone());
+                if self.msgsf.phase_one_two_msgs == 1 {
+                    return Ok(SendingMessages::EmptyMsg);
+                }
+
+                if !self.msgs.phase_one_two_msgs.get(&index).is_some() {
+                    self.msgs
+                        .phase_one_two_msgs
+                        .insert(index.clone(), msg.clone());
+                }
+
                 if self.msgs.phase_one_two_msgs.len() == self.params.share_count {
                     for (_index, msg_) in self.msgs.phase_one_two_msgs.iter() {
                         self.verify_phase_one_msg(&msg_.h_caret, &msg_.h, &msg_.gp)?;
@@ -351,26 +389,31 @@ impl KeyGenPhase {
                     let keygen_phase_three_msg = KeyGenPhaseThreeMsg {
                         open: self.dlog_com.open.clone(),
                     };
+
+                    self.msgs
+                        .phase_three_msgs
+                        .insert(self.party_index.clone(), keygen_phase_three_msg.clone());
+
                     let sending_msg =
                         MultiKeyGenMessage::PhaseThreeMsg(keygen_phase_three_msg.clone());
                     let sending_msg_bytes = bincode::serialize(&sending_msg).map_err(|why| {
                         format_err!("Serialize error in keygen phase one two, cause {}", why)
                     })?;
+                    self.msgsf.phase_one_two_msgs = 1;
                     return Ok(SendingMessages::BroadcastMessage(sending_msg_bytes));
                 }
             }
             MultiKeyGenMessage::PhaseThreeMsg(msg) => {
-                // Already received the msg
-                if self.msgs.phase_three_msgs.get(&index).is_some() {
+                if self.msgsf.phase_three_msgs == 1 {
                     return Ok(SendingMessages::EmptyMsg);
                 }
 
-                // Handle the msg
-                self.msgs
-                    .phase_three_msgs
-                    .insert(index.clone(), msg.clone());
+                if !self.msgs.phase_three_msgs.get(&index).is_some() {
+                    self.msgs
+                        .phase_three_msgs
+                        .insert(index.clone(), msg.clone());
+                }
 
-                // Generate the next msg
                 if self.msgs.phase_three_msgs.len() == self.params.share_count {
                     for (index, msg) in self.msgs.phase_three_msgs.clone().iter() {
                         if *index != self.party_index {
@@ -378,15 +421,18 @@ impl KeyGenPhase {
                         }
                     }
                     let sending_msg = self.get_phase_four_msg();
+                    self.msgsf.phase_three_msgs = 1;
                     return Ok(SendingMessages::P2pMessage(sending_msg));
                 }
             }
             MultiKeyGenMessage::PhaseFourMsg(msg) => {
-                if self.msgs.phase_four_msgs.get(&index).is_some() {
+                if self.msgsf.phase_four_msgs == 1 {
                     return Ok(SendingMessages::EmptyMsg);
                 }
 
-                self.msgs.phase_four_msgs.insert(index.clone(), msg.clone());
+                if !self.msgs.phase_four_msgs.get(&index).is_some() {
+                    self.msgs.phase_four_msgs.insert(index.clone(), msg.clone());
+                }
 
                 if self.msgs.phase_four_msgs.len() == self.params.share_count {
                     for (index, msg) in self.msgs.phase_four_msgs.clone().iter() {
@@ -395,24 +441,35 @@ impl KeyGenPhase {
                         }
                     }
                     let msg_five = self.generate_phase_five_msg();
+
+                    // todo: compatibility(self to self), 20220823
+                    // self.msgs
+                    //     .phase_five_msgs
+                    //     .insert(self.party_index.clone(), msg_five.clone());
+
                     let sending_msg = MultiKeyGenMessage::PhaseFiveMsg(msg_five);
                     let sending_msg_bytes = bincode::serialize(&sending_msg).map_err(|why| {
                         format_err!("Serialize error in keygen phase four, cause {}", why)
                     })?;
+                    self.msgsf.phase_four_msgs = 1;
                     return Ok(SendingMessages::BroadcastMessage(sending_msg_bytes));
                 }
             }
             MultiKeyGenMessage::PhaseFiveMsg(msg) => {
-                if self.msgs.phase_five_msgs.get(&index).is_some() {
+                if self.msgsf.phase_five_msgs == 1 {
                     return Ok(SendingMessages::EmptyMsg);
                 }
 
-                self.msgs.phase_five_msgs.insert(index.clone(), msg.clone());
+                if !self.msgs.phase_five_msgs.get(&index).is_some() {
+                    self.msgs.phase_five_msgs.insert(index.clone(), msg.clone());
+                }
+
                 if self.msgs.phase_five_msgs.len() == self.params.share_count {
                     for (index, msg) in self.msgs.phase_five_msgs.clone().iter() {
                         self.handle_phase_five_msg(index.clone(), &msg)?;
                     }
                     let keygen_json = self.generate_result_json_string()?;
+                    self.msgsf.phase_five_msgs = 1;
                     return Ok(SendingMessages::KeyGenSuccessWithResult(keygen_json));
                 }
             }

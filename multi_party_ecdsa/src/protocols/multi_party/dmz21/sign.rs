@@ -57,6 +57,19 @@ pub struct SignMsgs {
     pub phase_five_step_seven_msgs: HashMap<String, SignPhaseFiveStepSevenMsg>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SignMsgsFlag {
+    pub phase_one_msgs: u8,
+    pub phase_two_msgs: u8,
+    pub phase_three_msgs: u8,
+    pub phase_four_msgs: u8,
+    pub phase_five_step_one_msgs: u8,
+    pub phase_five_step_two_msgs: u8,
+    pub phase_five_step_four_msgs: u8,
+    pub phase_five_step_five_msgs: u8,
+    pub phase_five_step_seven_msgs: u8,
+}
+
 /// Sign struct
 #[derive(Debug, Clone)]
 pub struct SignPhase {
@@ -78,6 +91,7 @@ pub struct SignPhase {
     pub v_map: HashMap<String, FE>,
     pub precomputation: HashMap<String, (Ciphertext, Ciphertext, GE)>,
     pub msgs: SignMsgs,
+    pub msgsf: SignMsgsFlag,
     pub dl_com: DlogCommitment,
     pub mutex: Arc<Mutex<usize>>,
 }
@@ -91,7 +105,7 @@ pub struct OfflineResult {
     pub sigma: FE,
     pub delta: FE,
     pub delta_sum: FE,
-    pub msgs: SignMsgs,
+    pub phase_four_msgs: HashMap<String, SignPhaseFourMsg>,
     pub public_signing_key: GE,
 }
 
@@ -115,6 +129,7 @@ pub struct SignPhaseOnline {
     pub delta: FE,
     pub delta_sum: FE,
     pub msgs: SignMsgs,
+    pub msgsf: SignMsgsFlag,
     pub public_signing_key: GE,
     pub msg_step_one: SignPhaseFiveStepOneMsg,
     pub msg_step_two: SignPhaseFiveStepTwoMsg,
@@ -149,6 +164,22 @@ impl SignMsgs {
         self.phase_five_step_four_msgs.clear();
         self.phase_five_step_five_msgs.clear();
         self.phase_five_step_seven_msgs.clear();
+    }
+}
+
+impl SignMsgsFlag {
+    pub fn new() -> Self {
+        Self {
+            phase_one_msgs: 0,
+            phase_two_msgs: 0,
+            phase_three_msgs: 0,
+            phase_four_msgs: 0,
+            phase_five_step_one_msgs: 0,
+            phase_five_step_two_msgs: 0,
+            phase_five_step_four_msgs: 0,
+            phase_five_step_five_msgs: 0,
+            phase_five_step_seven_msgs: 0,
+        }
     }
 }
 
@@ -264,6 +295,7 @@ impl SignPhase {
             v_map: HashMap::new(),
             precomputation: HashMap::new(),
             msgs: SignMsgs::new(),
+            msgsf: SignMsgsFlag::new(),
             dl_com,
             mutex,
         };
@@ -353,7 +385,7 @@ impl SignPhase {
                 }
             });
         })
-        .unwrap();
+        .map_err(|_| format_err!("crossbeam::scope thread.spawn error"))?;
 
         let msg_two = SignPhaseTwoMsg {
             homocipher,
@@ -446,10 +478,11 @@ impl SignPhase {
         Ok(())
     }
 
-    /// Generate sign offline round1 message, output data and send mode (send, send_subset or broadcast)
+    /// Generate the first round message.
     pub fn process_begin(&mut self) -> Result<SendingMessages, anyhow::Error> {
         let lock = Arc::clone(&self.mutex);
         let _lock = lock.lock().unwrap();
+        // todo: `if` unnecessary
         if self.subset.contains(&self.party_index) {
             let cipher = PromiseCipher::encrypt(
                 &GROUP_UPDATE_1827,
@@ -473,6 +506,9 @@ impl SignPhase {
                 promise_state,
                 proof,
             };
+            self.msgs
+                .phase_one_msgs
+                .insert(self.party_index.clone(), msg.clone());
             let msg_sending = MultiSignMessage::PhaseOneMsg(msg);
             let msg_sending_bytes = bincode::serialize(&msg_sending)
                 .map_err(|why| format!("bincode serialize error: {}", why))
@@ -482,7 +518,12 @@ impl SignPhase {
         Ok(SendingMessages::EmptyMsg)
     }
 
-    /// Handle message received and generate next round message in offline phase, output data and send mode (send, send_subset or broadcast)
+    /// Handle message received and generate next round message.
+    /// Return a result or the message to be sent in the next round.
+    ///
+    /// When a message is received, the processing is as follows:
+    ///   If this message already exists, do nothing; otherwise, insert it into the cache.
+    ///   When all the necessary messages have been received, generate the result or the next round of messages.
     pub fn msg_handler(
         &mut self,
         index: String,
@@ -503,31 +544,31 @@ impl SignPhase {
         })?;
         match msg {
             MultiSignMessage::PhaseOneMsg(msg) => {
-                // Already received the msg
-                if self.msgs.phase_one_msgs.get(&index).is_some() {
+                if self.msgsf.phase_one_msgs == 1 {
                     return Ok(SendingMessages::EmptyMsg);
                 }
-                // Handle the msg and generate the reply msg
-                self.msgs.phase_one_msgs.insert(index.clone(), msg.clone());
+
+                if !self.msgs.phase_one_msgs.get(&index).is_some() {
+                    self.msgs.phase_one_msgs.insert(index.clone(), msg.clone());
+                }
+
                 if self.msgs.phase_one_msgs.len() == self.party_num {
-                    let phase_two_sending_msgs: HashMap<String, SignPhaseTwoMsg> = HashMap::new();
-                    let mutex_msgs = Arc::new(Mutex::new(phase_two_sending_msgs));
+                    let mut t_msgs = HashMap::new();
                     for (index, msg) in self.msgs.clone().phase_one_msgs.into_iter() {
-                        let mutex_msgs = Arc::clone(&mutex_msgs);
                         if *index == self.party_index {
                             let msg_two = SignPhaseTwoMsg::new();
-                            let mut msgs = mutex_msgs.lock().unwrap();
-                            (*msgs).insert(index.clone(), msg_two);
+                            t_msgs.insert(index.clone(), msg_two);
                         } else {
                             let mut phase = self.clone();
                             let msg_two = phase.handle_phase_one_msg(index.clone(), &msg).unwrap();
-                            let mut msgs = mutex_msgs.lock().unwrap();
-                            (*msgs).insert(index.clone(), msg_two);
+                            t_msgs.insert(index.clone(), msg_two);
                         }
                     }
-                    let result = &*mutex_msgs.lock().unwrap();
-                    for (index, msg) in result.into_iter() {
-                        let sending_msg = MultiSignMessage::PhaseTwoMsg((*msg).clone());
+                    for (index, msg) in t_msgs.into_iter() {
+                        if *index == self.party_index {
+                            self.msgs.phase_two_msgs.insert(index.clone(), msg.clone());
+                        }
+                        let sending_msg = MultiSignMessage::PhaseTwoMsg(msg.clone());
                         let sending_msg_bytes = bincode::serialize(&sending_msg)
                             .map_err(|why| {
                                 format_err!(
@@ -540,21 +581,21 @@ impl SignPhase {
                             .phase_two_sending_msgs
                             .insert(index.clone(), sending_msg_bytes);
                     }
+                    self.msgsf.phase_one_msgs = 1;
+                    return Ok(SendingMessages::P2pMessage(
+                        self.msgs.phase_two_sending_msgs.clone(),
+                    ));
                 }
-                return Ok(SendingMessages::P2pMessage(
-                    self.msgs.phase_two_sending_msgs.clone(),
-                ));
             }
             MultiSignMessage::PhaseTwoMsg(msg) => {
-                // Already received the msg
-                if self.msgs.phase_two_msgs.get(&index).is_some() {
+                if self.msgsf.phase_two_msgs == 1 {
                     return Ok(SendingMessages::EmptyMsg);
                 }
 
-                // Handle the msg
-                self.msgs.phase_two_msgs.insert(index.clone(), msg.clone());
+                if !self.msgs.phase_two_msgs.get(&index).is_some() {
+                    self.msgs.phase_two_msgs.insert(index.clone(), msg.clone());
+                }
 
-                // Generate the next msg
                 if self.msgs.phase_two_msgs.len() == self.party_num {
                     for (index_, msg_) in self.msgs.phase_two_msgs.clone().iter() {
                         if *index_ != self.party_index {
@@ -564,32 +605,56 @@ impl SignPhase {
                     let msg_three = SignPhaseThreeMsg {
                         delta: self.delta.clone(),
                     };
+
+                    self.msgs
+                        .phase_three_msgs
+                        .insert(self.party_index.clone(), msg_three.clone());
+
                     let sending_msg = MultiSignMessage::PhaseThreeMsg(msg_three);
                     let sending_msg_bytes = bincode::serialize(&sending_msg).map_err(|why| {
                         format_err!("Serialize error in sign offline phase two, cause {}", why)
                     })?;
+                    self.msgsf.phase_two_msgs = 1;
                     return Ok(SendingMessages::SubsetMessage(sending_msg_bytes));
                 }
             }
             MultiSignMessage::PhaseThreeMsg(msg) => {
-                self.msgs.phase_three_msgs.insert(index, msg.clone());
+                if self.msgsf.phase_three_msgs == 1 {
+                    return Ok(SendingMessages::EmptyMsg);
+                }
+
+                if !self.msgs.phase_three_msgs.get(&index).is_some() {
+                    self.msgs.phase_three_msgs.insert(index, msg.clone());
+                }
+
                 if self.msgs.phase_three_msgs.len() == self.party_num {
                     self.phase_two_compute_delta_sum_msg()?;
                     let msg_four = SignPhaseFourMsg {
                         open: self.dl_com.clone().open,
                     };
+
+                    // todo: compatibility(self to self), 20220823
+                    // self.msgs
+                    //     .phase_four_msgs
+                    //     .insert(self.party_index.clone(), msg_four.clone());
+
                     let sending_msg = MultiSignMessage::PhaseFourMsg(msg_four.clone());
                     let sending_msg_bytes = bincode::serialize(&sending_msg).map_err(|why| {
                         format_err!("Serialize error in sign offline phase three, cause {}", why)
                     })?;
+                    self.msgsf.phase_three_msgs = 1;
                     return Ok(SendingMessages::SubsetMessage(sending_msg_bytes));
                 }
             }
             MultiSignMessage::PhaseFourMsg(msg) => {
-                if self.msgs.phase_four_msgs.get(&index).is_some() {
+                if self.msgsf.phase_four_msgs == 1 {
                     return Ok(SendingMessages::EmptyMsg);
                 }
-                self.msgs.phase_four_msgs.insert(index, msg.clone());
+
+                if !self.msgs.phase_four_msgs.get(&index).is_some() {
+                    self.msgs.phase_four_msgs.insert(index, msg.clone());
+                }
+
                 if self.msgs.phase_four_msgs.len() == self.party_num {
                     for (index_, msg_) in self.msgs.phase_four_msgs.clone().iter() {
                         if *index_ != self.party_index {
@@ -604,7 +669,7 @@ impl SignPhase {
                         sigma: self.sigma.clone(),
                         delta: self.delta.clone(),
                         delta_sum: self.delta_sum.clone(),
-                        msgs: self.msgs.clone(),
+                        phase_four_msgs: self.msgs.phase_four_msgs.clone(),
                         public_signing_key: self.public_signing_key.clone(),
                     };
                     let retb = bincode::serialize(&offline_result).unwrap();
@@ -616,6 +681,7 @@ impl SignPhase {
                     })
                     .map_err(|why| format_err!("To string failed: {}", why))
                     .unwrap();
+                    self.msgsf.phase_four_msgs = 1;
                     return Ok(SendingMessages::SignOfflineSuccessWithResult(
                         offline_result_string,
                     ));
@@ -674,7 +740,6 @@ impl SignPhaseOnline {
         // compute r_x
         let g = GE::generator().to_point();
         let r = offline_result
-            .msgs
             .phase_four_msgs
             .iter()
             .fold(g.clone(), |acc, (_i, v)| acc + v.open.public_share.clone())
@@ -749,7 +814,8 @@ impl SignPhaseOnline {
             l: l_i,
             delta: offline_result.delta,
             delta_sum: offline_result.delta_sum,
-            msgs: offline_result.msgs,
+            msgs: SignMsgs::new(),
+            msgsf: SignMsgsFlag::new(),
             public_signing_key: offline_result.public_signing_key,
             msg_step_one,
             msg_step_two,
@@ -966,12 +1032,18 @@ impl SignPhaseOnline {
         })
     }
 
-    /// Generate Sign online round1 message, output data and send mode (send, send_subset or broadcast)
+    /// Generate the first round message.
     pub fn process_begin(&mut self) -> Result<SendingMessages, anyhow::Error> {
         let lock = Arc::clone(&self.mutex);
         let _lock = lock.lock().unwrap();
+        // todo: `if` unnecessary
         if self.subset.contains(&self.party_index) {
             let msg = self.msg_step_one.clone();
+
+            self.msgs
+                .phase_five_step_one_msgs
+                .insert(self.party_index.clone(), msg.clone());
+
             let msg_sending = MultiSignMessage::PhaseFiveStepOneMsg(msg);
             let msg_sending_bytes = bincode::serialize(&msg_sending)
                 .map_err(|why| format!("bincode serialize error: {}", why))
@@ -981,7 +1053,12 @@ impl SignPhaseOnline {
         Ok(SendingMessages::EmptyMsg)
     }
 
-    /// Handle message received and generate next round message in online phase, output data and send mode (send, send_subset or broadcast)
+    /// Handle message received and generate next round message.
+    /// Return a result or the message to be sent in the next round.
+    ///
+    /// When a message is received, the processing is as follows:
+    ///   If this message already exists, do nothing; otherwise, insert it into the cache.
+    ///   When all the necessary messages have been received, generate the result or the next round of messages.
     pub fn msg_handler(
         &mut self,
         index: String,
@@ -998,11 +1075,23 @@ impl SignPhaseOnline {
             .unwrap();
         match msg {
             MultiSignMessage::PhaseFiveStepOneMsg(msg) => {
-                self.msgs
-                    .phase_five_step_one_msgs
-                    .insert(index, msg.clone());
+                if self.msgsf.phase_five_step_one_msgs == 1 {
+                    return Ok(SendingMessages::EmptyMsg);
+                }
+
+                if !self.msgs.phase_five_step_one_msgs.get(&index).is_some() {
+                    self.msgs
+                        .phase_five_step_one_msgs
+                        .insert(index, msg.clone());
+                }
+
                 if self.msgs.phase_five_step_one_msgs.len() == self.party_num {
                     let msg_five_two = self.msg_step_two.clone();
+
+                    self.msgs
+                        .phase_five_step_two_msgs
+                        .insert(self.party_index.clone(), msg_five_two.clone());
+
                     let sending_msg = MultiSignMessage::PhaseFiveStepTwoMsg(msg_five_two.clone());
                     let sending_msg_bytes = bincode::serialize(&sending_msg).map_err(|why| {
                         format_err!(
@@ -1010,26 +1099,32 @@ impl SignPhaseOnline {
                             why
                         )
                     })?;
+                    self.msgsf.phase_five_step_one_msgs = 1;
                     return Ok(SendingMessages::SubsetMessage(sending_msg_bytes));
                 }
             }
             MultiSignMessage::PhaseFiveStepTwoMsg(msg) => {
-                // Already received the msg
-                if self.msgs.phase_five_step_two_msgs.get(&index).is_some() {
+                if self.msgsf.phase_five_step_two_msgs == 1 {
                     return Ok(SendingMessages::EmptyMsg);
                 }
 
-                // Handle the msg
-                self.msgs
-                    .phase_five_step_two_msgs
-                    .insert(index.clone(), msg.clone());
-                // Generate the next msg
+                if !self.msgs.phase_five_step_two_msgs.get(&index).is_some() {
+                    self.msgs
+                        .phase_five_step_two_msgs
+                        .insert(index.clone(), msg.clone());
+                }
+
                 if self.msgs.phase_five_step_two_msgs.len() == self.party_num {
                     for (index_, msg_) in self.msgs.phase_five_step_two_msgs.clone().iter() {
                         self.handle_phase_five_step_two_msg(index_.clone(), &msg_)?;
                     }
                     let msg_five_four =
                         self.generate_phase_five_step_four_msg(self.message.clone())?;
+
+                    self.msgs
+                        .phase_five_step_four_msgs
+                        .insert(self.party_index.clone(), msg_five_four.clone());
+
                     let sending_msg = MultiSignMessage::PhaseFiveStepFourMsg(msg_five_four.clone());
 
                     let sending_msg_bytes = bincode::serialize(&sending_msg).map_err(|why| {
@@ -1038,15 +1133,28 @@ impl SignPhaseOnline {
                             why
                         )
                     })?;
+                    self.msgsf.phase_five_step_two_msgs = 1;
                     return Ok(SendingMessages::SubsetMessage(sending_msg_bytes));
                 }
             }
             MultiSignMessage::PhaseFiveStepFourMsg(msg) => {
-                self.msgs
-                    .phase_five_step_four_msgs
-                    .insert(index, msg.clone());
+                if self.msgsf.phase_five_step_four_msgs == 1 {
+                    return Ok(SendingMessages::EmptyMsg);
+                }
+
+                if !self.msgs.phase_five_step_four_msgs.get(&index).is_some() {
+                    self.msgs
+                        .phase_five_step_four_msgs
+                        .insert(index, msg.clone());
+                }
+
                 if self.msgs.phase_five_step_four_msgs.len() == self.party_num {
                     let msg_five_five = self.msg_step_five.clone();
+
+                    self.msgs
+                        .phase_five_step_five_msgs
+                        .insert(self.party_index.clone(), msg_five_five.clone());
+
                     let sending_msg = MultiSignMessage::PhaseFiveStepFiveMsg(msg_five_five.clone());
                     let sending_msg_bytes = bincode::serialize(&sending_msg).map_err(|why| {
                         format_err!(
@@ -1054,16 +1162,21 @@ impl SignPhaseOnline {
                             why
                         )
                     })?;
+                    self.msgsf.phase_five_step_four_msgs = 1;
                     return Ok(SendingMessages::SubsetMessage(sending_msg_bytes));
                 }
             }
             MultiSignMessage::PhaseFiveStepFiveMsg(msg) => {
-                if self.msgs.phase_five_step_five_msgs.get(&index).is_some() {
+                if self.msgsf.phase_five_step_five_msgs == 1 {
                     return Ok(SendingMessages::EmptyMsg);
                 }
-                self.msgs
-                    .phase_five_step_five_msgs
-                    .insert(index, msg.clone());
+
+                if !self.msgs.phase_five_step_five_msgs.get(&index).is_some() {
+                    self.msgs
+                        .phase_five_step_five_msgs
+                        .insert(index, msg.clone());
+                }
+
                 if self.msgs.phase_five_step_five_msgs.len() == self.party_num {
                     for (index_, msg_) in self.msgs.phase_five_step_five_msgs.clone().iter() {
                         self.handle_phase_five_step_five_msg(index_.clone(), &msg_)?;
@@ -1071,6 +1184,12 @@ impl SignPhaseOnline {
                     self.phase_five_step_six_check_sum_a_t()
                             .map_err(|why| format_err!("Verify sum of a and t failed in sign online phase five step five, cause {}", why))?;
                     let msg_seven = self.msg_step_seven.clone();
+
+                    // todo: compatibility(self to self), 20220823
+                    // self.msgs
+                    //     .phase_five_step_seven_msgs
+                    //     .insert(self.party_index.clone(), msg_seven.clone());
+
                     let sending_msg = MultiSignMessage::PhaseFiveStepSevenMsg(msg_seven.clone());
                     let sending_msg_bytes = bincode::serialize(&sending_msg).map_err(|why| {
                         format_err!(
@@ -1078,13 +1197,21 @@ impl SignPhaseOnline {
                             why
                         )
                     })?;
+                    self.msgsf.phase_five_step_five_msgs = 1;
                     return Ok(SendingMessages::SubsetMessage(sending_msg_bytes));
                 }
             }
             MultiSignMessage::PhaseFiveStepSevenMsg(msg) => {
-                self.msgs
-                    .phase_five_step_seven_msgs
-                    .insert(index, msg.clone());
+                if self.msgsf.phase_five_step_seven_msgs == 1 {
+                    return Ok(SendingMessages::EmptyMsg);
+                }
+
+                if !self.msgs.phase_five_step_seven_msgs.get(&index).is_some() {
+                    self.msgs
+                        .phase_five_step_seven_msgs
+                        .insert(index, msg.clone());
+                }
+
                 if self.msgs.phase_five_step_seven_msgs.len() == self.party_num {
                     let signature = self.phase_five_step_eight_generate_signature_msg()?;
                     signature.verify(&self.public_signing_key, &self.message)?;
@@ -1097,6 +1224,7 @@ impl SignPhaseOnline {
                         format_err!("To string failed in keygen phase five, cause {}", why)
                     })?;
 
+                    self.msgsf.phase_five_step_seven_msgs = 1;
                     return Ok(SendingMessages::SignOnlineSuccessWithResult(signature_json));
                 }
             }
