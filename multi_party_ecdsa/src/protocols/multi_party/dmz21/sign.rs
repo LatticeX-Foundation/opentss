@@ -475,6 +475,13 @@ impl SignPhase {
         ))?;
         DlogCommitment::verify_dlog(&msg_one.commitment, &msg.open)?;
 
+        DLogProof::verify(&msg.dl_proof).map_err(|why| {
+            format_err!(
+                "Verify dlog failed error in sign offline phase four, cause {}",
+                why
+            )
+        })?;
+
         Ok(())
     }
 
@@ -629,8 +636,11 @@ impl SignPhase {
 
                 if self.msgs.phase_three_msgs.len() == self.party_num {
                     self.phase_two_compute_delta_sum_msg()?;
+
+                    let dl_proof = DLogProof::<CU, sha2::Sha256>::prove(&self.gamma);
                     let msg_four = SignPhaseFourMsg {
                         open: self.dl_com.clone().open,
+                        dl_proof,
                     };
 
                     // todo: compatibility(self to self), 20220823

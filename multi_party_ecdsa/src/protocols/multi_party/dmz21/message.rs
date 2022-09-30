@@ -116,6 +116,7 @@ pub struct SignPhaseThreeMsg {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SignPhaseFourMsg {
     pub open: DlogCommitmentOpen,
+    pub dl_proof: DLogProof<CU, sha2::Sha256>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
