@@ -112,7 +112,7 @@ Once `SendingMessages::KeyGenSuccessWithResult` is received, it indicates comple
 
 ## Contact
 
-You could reach us by [email](mailto:kyle.song@latticex.foundation). 
+You could reach us by [email](mailto:support@latticex.foundation). 
 
 ## License
 
