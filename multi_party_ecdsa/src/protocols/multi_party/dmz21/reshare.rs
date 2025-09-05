@@ -181,8 +181,16 @@ impl ReshareKeyPhase {
                         let index_bigint = BigInt::from_str_radix(&self.party_index, 16).unwrap();
                         let l_i = map_share_to_new_params(index_bigint, &s_bigint);
                         let a_i = old_share * l_i;
+                        // NOTE: Shamir sharing with threshold t should use a polynomial of degree t-1.
+                        // The original implementation mistakenly used `t` as the polynomial degree by
+                        // passing `t` directly to `share_at_indices` (which interprets the first arg as degree).
+                        // This causes inconsistencies specifically when `t == n` (e.g. 3-of-3 after reshare),
+                        // breaking later signing invariants that rely on the reconstructed secret being exact.
+                        // We correct this by using `self.new_threshold - 1` while preserving externally
+                        // observable threshold semantics.
+                        let shamir_degree = if self.new_threshold == 0 { 0 } else { self.new_threshold - 1 }; // defensive
                         let (vss_scheme, secret_shares) = share_at_indices(
-                            self.new_threshold,
+                            shamir_degree,
                             self.new_party_ids.len(),
                             &a_i,
                             &self.new_party_ids,
