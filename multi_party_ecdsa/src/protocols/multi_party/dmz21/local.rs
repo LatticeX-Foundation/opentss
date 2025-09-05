@@ -2242,3 +2242,277 @@ fn test_reshare_key_phase_create_do_refresh() {
     let reshare3 = t3.join().unwrap();
 
 }
+
+/// New integration test: keygen 5 parties (1..5), reshare to parties (1,3,5) with same threshold logic,
+/// then perform offline + online signing over that new subset to ensure the signing path works after reshare.
+#[test]
+fn test_keygen_reshare_sign_subset_1_3_5_6_7() {
+    // 1. Original keygen with parties 1..5
+    let n: usize = 5;
+    let params = Parameters {
+        threshold: 3, // pick threshold 3 for 5 parties
+        share_count: n,
+    };
+    let party_ids: Vec<String> = (1..=n).map(|i| i.to_string()).collect();
+
+    let sender_receiver_map = generate_sender_receiver_map(party_ids.clone());
+    let router = generate_multi_router(sender_receiver_map.clone());
+
+    let mut keygen_threads = BTreeMap::new();
+    for pid in &party_ids {
+        let tx = sender_receiver_map[pid].1 .0.clone();
+        let rx = sender_receiver_map[pid].0 .1.clone();
+        let params_c = params.clone();
+        let parties_c = party_ids.clone();
+        let id = pid.clone();
+        let handle = thread::spawn(move || dmz_multi_keygen_local(id, params_c, Some(parties_c), tx, rx));
+        keygen_threads.insert(pid.clone(), handle);
+    }
+    let keygen_results: BTreeMap<String, String> = keygen_threads
+        .into_iter()
+        .map(|(id, h)| (id, h.join().unwrap()))
+        .collect();
+    drop(router); // original router thread exits once channels drop
+
+    // 2. Reshare to subset 1,2,3,5, 6 (five parties). Keep threshold = 4 (now 4-of-5 required)
+    let new_party_ids = vec!["1".to_string(), "2".to_string(), "3".to_string(), "5".to_string(), "6".to_string()];
+    let new_threshold = 3;
+
+    let sender_receiver_map_reshare = generate_sender_receiver_map(new_party_ids.clone());
+    let router_reshare = generate_multi_router(sender_receiver_map_reshare.clone());
+
+    let mut reshare_threads = BTreeMap::new();
+    for pid in &new_party_ids {
+        let tx = sender_receiver_map_reshare[pid].1 .0.clone();
+        let rx = sender_receiver_map_reshare[pid].0 .1.clone();
+        let old_parties = party_ids.clone();
+        let new_parties = new_party_ids.clone();
+        let key_opt = keygen_results.get(pid).cloned(); // Some for existing, None for removed -> but all in new subset existed
+        let id = pid.clone();
+        let handle = thread::spawn(move || {
+            dmz_multi_reshare_local(
+                id,
+                old_parties,
+                new_parties,
+                new_threshold,
+                tx,
+                rx,
+                key_opt,
+            )
+        });
+        reshare_threads.insert(pid.clone(), handle);
+    }
+    let reshare_results: BTreeMap<String, String> = reshare_threads
+        .into_iter()
+        .map(|(id, h)| (id, h.join().unwrap()))
+        .collect();
+    drop(router_reshare);
+
+    // 3. Offline sign for subset 1,3,5
+    let sign_params = Parameters {
+        threshold: new_threshold,
+        share_count: new_party_ids.len(),
+    };
+    let subset = new_party_ids.clone();
+    let message = b"deadbeefcafebabefeedface01234567".to_vec();
+
+    let sender_receiver_map_offline = generate_sender_receiver_map(new_party_ids.clone());
+    let router_offline = generate_multi_router(sender_receiver_map_offline.clone());
+    let mut offline_threads = BTreeMap::new();
+    for pid in &new_party_ids {
+        let tx = sender_receiver_map_offline[pid].1 .0.clone();
+        let rx = sender_receiver_map_offline[pid].0 .1.clone();
+        let params_c = sign_params.clone();
+        let subset_c = subset.clone();
+        let keys_string = reshare_results.get(pid).unwrap().clone();
+        let id = pid.clone();
+        let handle = thread::spawn(move || {
+            dmz_multi_offline_sign_local(id, params_c, subset_c, tx, rx, keys_string)
+        });
+        offline_threads.insert(pid.clone(), handle);
+    }
+    let offline_results: BTreeMap<String, String> = offline_threads
+        .into_iter()
+        .map(|(id, h)| (id, h.join().unwrap()))
+        .collect();
+    drop(router_offline);
+
+    // 4. Online sign for subset 1,3,5
+    let sender_receiver_map_online = generate_sender_receiver_map(new_party_ids.clone());
+    let router_online = generate_multi_router(sender_receiver_map_online.clone());
+    let mut online_threads = BTreeMap::new();
+    for pid in &new_party_ids {
+        let tx = sender_receiver_map_online[pid].1 .0.clone();
+        let rx = sender_receiver_map_online[pid].0 .1.clone();
+        let offline_result = offline_results.get(pid).unwrap().clone();
+        let msg = message.clone();
+        let handle = thread::spawn(move || dmz_multi_online_sign_local(tx, rx, offline_result, msg));
+        online_threads.insert(pid.clone(), handle);
+    }
+    let _signatures: BTreeMap<String, String> = online_threads
+        .into_iter()
+        .map(|(id, h)| (id, h.join().unwrap()))
+        .collect();
+    drop(router_online);
+
+    let party_ids = new_party_ids.clone();
+
+    // 5. Now reshare the result of the reshare and this time we have participants left 1,3,5,6 and threshold 3
+    let party_ids = new_party_ids;
+    let new_party_ids = vec!["1".to_string(),"5".to_string(), "6".to_string(), "7".to_string()];
+
+    let new_threshold = 3; // only 3 required now (3-of-4)
+
+
+    let sender_receiver_map_reshare = generate_sender_receiver_map(new_party_ids.clone());
+    let router_reshare = generate_multi_router(sender_receiver_map_reshare.clone());
+    let mut reshare_threads = BTreeMap::new();
+    for pid in &new_party_ids {
+        let tx = sender_receiver_map_reshare[pid].1 .0.clone();
+        let rx = sender_receiver_map_reshare[pid].0 .1.clone();
+        let old_parties = party_ids.clone();
+        let new_parties = new_party_ids.clone();
+        let key_opt = reshare_results.get(pid).cloned();
+        let id = pid.clone();
+        let handle = thread::spawn(move || dmz_multi_reshare_local(id, old_parties, new_parties, new_threshold, tx, rx, key_opt));
+        reshare_threads.insert(pid.clone(), handle);
+    }
+    let reshare_results: BTreeMap<String, String> = reshare_threads.into_iter().map(|(id,h)|(id,h.join().unwrap())).collect();
+    drop(router_reshare);
+
+    // Offline with the reshared keys
+
+    let sign_params = Parameters {
+        threshold: new_threshold,
+        share_count: new_party_ids.len(),
+    };
+    let subset = new_party_ids.clone();
+
+    let sender_receiver_map_offline = generate_sender_receiver_map(new_party_ids.clone());
+    let router_offline = generate_multi_router(sender_receiver_map_offline.clone());
+    let mut offline_threads = BTreeMap::new();
+    for pid in &new_party_ids {
+        let tx = sender_receiver_map_offline[pid].1 .0.clone();
+        let rx = sender_receiver_map_offline[pid].0 .1.clone();
+        let params_c = sign_params.clone();
+        let subset_c = subset.clone();
+        let keys_string = reshare_results.get(pid).unwrap().clone();
+        let id = pid.clone();
+        let handle = thread::spawn(move || {
+            dmz_multi_offline_sign_local(id, params_c, subset_c, tx, rx, keys_string)
+        });
+        offline_threads.insert(pid.clone(), handle);
+    }
+    let offline_results: BTreeMap<String, String> = offline_threads
+        .into_iter()
+        .map(|(id, h)| (id, h.join().unwrap()))
+        .collect();
+    drop(router_offline);
+
+    // Sign online
+    let sender_receiver_map_sign = generate_sender_receiver_map(new_party_ids.clone());
+    let router_sign = generate_multi_router(sender_receiver_map_sign.clone());
+    let mut sign_threads = BTreeMap::new();
+    for pid in &new_party_ids {
+        let tx = sender_receiver_map_sign[pid].1 .0.clone();
+        let rx = sender_receiver_map_sign[pid].0 .1.clone();
+        let offline_result = offline_results.get(pid).unwrap().clone();
+        let msg = message.clone();
+        let handle = thread::spawn(move || dmz_multi_online_sign_local(tx, rx, offline_result, msg));
+        sign_threads.insert(pid.clone(), handle);
+    }
+    let signatures: BTreeMap<String, String> = sign_threads
+        .into_iter()
+        .map(|(id, h)| (id, h.join().unwrap()))
+        .collect();
+    drop(router_sign);
+
+    /// Verify all signatures are identical
+    let first_signature = signatures.values().next().unwrap();
+    for sig in signatures.values() {
+        assert_eq!(sig, first_signature);
+    }
+    // check that there are exactly four signatures
+    assert_eq!(signatures.len(), 4);
+
+}
+
+#[test]
+fn test_keygen_reshare_sign_subset_1_3_5_threshold3() {
+    // Original 5 parties, threshold 3
+    let n: usize = 5;
+    let params = Parameters {
+        threshold: 3,
+        share_count: n,
+    };
+    let party_ids: Vec<String> = (1..=n).map(|i| i.to_string()).collect();
+
+    let sender_receiver_map = generate_sender_receiver_map(party_ids.clone());
+    let router = generate_multi_router(sender_receiver_map.clone());
+    let mut keygen_threads = BTreeMap::new();
+    for pid in &party_ids {
+        let tx = sender_receiver_map[pid].1 .0.clone();
+        let rx = sender_receiver_map[pid].0 .1.clone();
+        let params_c = params.clone();
+        let parties_c = party_ids.clone();
+        let id = pid.clone();
+        let handle = thread::spawn(move || dmz_multi_keygen_local(id, params_c, Some(parties_c), tx, rx));
+        keygen_threads.insert(pid.clone(), handle);
+    }
+    let keygen_results: BTreeMap<String, String> = keygen_threads.into_iter().map(|(id,h)|(id,h.join().unwrap())).collect();
+    drop(router);
+
+    // Reshare to 1,3,5 with threshold 3
+    let new_party_ids = vec!["1".to_string(), "3".to_string(), "5".to_string()];
+    let new_threshold = 3; // all must participate
+    let sender_receiver_map_reshare = generate_sender_receiver_map(new_party_ids.clone());
+    let router_reshare = generate_multi_router(sender_receiver_map_reshare.clone());
+    let mut reshare_threads = BTreeMap::new();
+    for pid in &new_party_ids {
+        let tx = sender_receiver_map_reshare[pid].1 .0.clone();
+        let rx = sender_receiver_map_reshare[pid].0 .1.clone();
+        let old_parties = party_ids.clone();
+        let new_parties = new_party_ids.clone();
+        let key_opt = keygen_results.get(pid).cloned();
+        let id = pid.clone();
+        let handle = thread::spawn(move || dmz_multi_reshare_local(id, old_parties, new_parties, new_threshold, tx, rx, key_opt));
+        reshare_threads.insert(pid.clone(), handle);
+    }
+    let reshare_results: BTreeMap<String, String> = reshare_threads.into_iter().map(|(id,h)|(id,h.join().unwrap())).collect();
+    drop(router_reshare);
+
+    // Offline sign
+    let sign_params = Parameters { threshold: new_threshold, share_count: new_party_ids.len() };
+    let subset = new_party_ids.clone();
+    let message = b"feedfacecafedeadbeef000011112222".to_vec();
+    let sender_receiver_map_offline = generate_sender_receiver_map(new_party_ids.clone());
+    let router_offline = generate_multi_router(sender_receiver_map_offline.clone());
+    let mut offline_threads = BTreeMap::new();
+    for pid in &new_party_ids {
+        let tx = sender_receiver_map_offline[pid].1 .0.clone();
+        let rx = sender_receiver_map_offline[pid].0 .1.clone();
+        let params_c = sign_params.clone();
+        let subset_c = subset.clone();
+        let keys_string = reshare_results.get(pid).unwrap().clone();
+        let id = pid.clone();
+        let handle = thread::spawn(move || dmz_multi_offline_sign_local(id, params_c, subset_c, tx, rx, keys_string));
+        offline_threads.insert(pid.clone(), handle);
+    }
+    let offline_results: BTreeMap<String, String> = offline_threads.into_iter().map(|(id,h)|(id,h.join().unwrap())).collect();
+    drop(router_offline);
+
+    // Online sign
+    let sender_receiver_map_online = generate_sender_receiver_map(new_party_ids.clone());
+    let router_online = generate_multi_router(sender_receiver_map_online.clone());
+    let mut online_threads = BTreeMap::new();
+    for pid in &new_party_ids {
+        let tx = sender_receiver_map_online[pid].1 .0.clone();
+        let rx = sender_receiver_map_online[pid].0 .1.clone();
+        let offline_result = offline_results.get(pid).unwrap().clone();
+        let msg = message.clone();
+        let handle = thread::spawn(move || dmz_multi_online_sign_local(tx, rx, offline_result, msg));
+        online_threads.insert(pid.clone(), handle);
+    }
+    let _signatures: BTreeMap<String, String> = online_threads.into_iter().map(|(id,h)|(id,h.join().unwrap())).collect();
+    drop(router_online);
+}
