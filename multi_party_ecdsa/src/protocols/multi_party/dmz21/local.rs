@@ -23,6 +23,7 @@ use crate::protocols::multi_party::dmz21::keygen::Parameters;
 use crate::protocols::multi_party::dmz21::reshare::ReshareKeyPhase;
 use crate::protocols::multi_party::dmz21::sign::SignPhase;
 use crate::protocols::multi_party::dmz21::sign::SignPhaseOnline;
+use crate::utilities::signature::Signature;
 use crate::utilities::vss::map_share_to_new_params;
 use crate::CU;
 use crate::FE;
@@ -2275,7 +2276,7 @@ fn test_keygen_reshare_sign_subset_1_3_5_6_7() {
     drop(router); // original router thread exits once channels drop
 
     // 2. Reshare to subset 1,2,3,5, 6 (five parties). Keep threshold = 4 (now 4-of-5 required)
-    let new_party_ids = vec!["1".to_string(), "2".to_string(), "3".to_string(), "5".to_string(), "6".to_string()];
+    let new_party_ids = vec!["1".to_string(), "2".to_string(), "3".to_string(), "5".to_string(), "6".to_string(), "12".to_string(), "10".to_string(), "11".to_string()];
     let new_threshold = 3;
 
     let sender_receiver_map_reshare = generate_sender_receiver_map(new_party_ids.clone());
@@ -2306,6 +2307,12 @@ fn test_keygen_reshare_sign_subset_1_3_5_6_7() {
         .into_iter()
         .map(|(id, h)| (id, h.join().unwrap()))
         .collect();
+    // keep a copy of the first reshare public key for later comparison
+    let first_reshare_any = reshare_results.values().next().unwrap().clone();
+    let first_reshare_pubkey = {
+        let k: DMZKeyX = serde_json::from_str(&first_reshare_any).unwrap();
+        (k.pubkey.pk[0].clone(), k.pubkey.pk[1].clone())
+    };
     drop(router_reshare);
 
     // 3. Offline sign for subset 1,3,5
@@ -2359,7 +2366,7 @@ fn test_keygen_reshare_sign_subset_1_3_5_6_7() {
 
     // 5. Now reshare the result of the reshare and this time we have participants left 1,3,5,6 and threshold 3
     let party_ids = new_party_ids;
-    let new_party_ids = vec!["1".to_string(),"5".to_string(), "6".to_string(), "7".to_string()];
+    let new_party_ids = vec!["6".to_string(),"10".to_string(), "11".to_string(), "12".to_string(), "7".to_string()];
 
     let new_threshold = 3; // only 3 required now (3-of-4)
 
@@ -2432,8 +2439,86 @@ fn test_keygen_reshare_sign_subset_1_3_5_6_7() {
     for sig in signatures.values() {
         assert_eq!(sig, first_signature);
     }
-    // check that there are exactly four signatures
-    assert_eq!(signatures.len(), 4);
+
+    // check that there are exactly five signatures
+    assert_eq!(signatures.len(), 5);
+
+    // === Public key consistency & recovery test (using libsecp256k1) ===
+    use crate::utilities::signature::SignatureX;
+    use secp256k1::{Message, PublicKey as SecpPk, Secp256k1, ecdsa::RecoverableSignature, ecdsa::RecoveryId};
+
+    // Original keygen public key (take party "1")
+    let original_key_any = keygen_results.get("1").unwrap();
+    let original_key: DMZKeyX = serde_json::from_str(original_key_any).unwrap();
+    let original_pubkey = (original_key.pubkey.pk[0].clone(), original_key.pubkey.pk[1].clone());
+
+    // Second (final) reshare public key (take any participant still present)
+    let second_reshare_any = reshare_results.values().next().unwrap().clone();
+    let second_reshare_key: DMZKeyX = serde_json::from_str(&second_reshare_any).unwrap();
+    let second_reshare_pubkey = (
+        second_reshare_key.pubkey.pk[0].clone(),
+        second_reshare_key.pubkey.pk[1].clone(),
+    );
+
+    // Assert public key unchanged across original keygen, first reshare and second reshare
+    assert_eq!(original_pubkey, first_reshare_pubkey, "Public key changed after first reshare");
+    assert_eq!(original_pubkey, second_reshare_pubkey, "Public key changed after second reshare");
+
+    // Recover public key from signature using libsecp256k1
+    let any_party = signatures.keys().next().unwrap();
+    let signature_json = signatures.get(any_party).unwrap();
+    let sig: SignatureX = serde_json::from_str(signature_json).unwrap();
+
+    fn hex_to_32(mut v: Vec<u8>) -> [u8; 32] {
+        if v.len() > 32 {
+            panic!("component longer than 32 bytes");
+        }
+        if v.len() < 32 {
+            let mut padded = vec![0u8; 32 - v.len()];
+            padded.extend_from_slice(&v);
+            v = padded;
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&v);
+        arr
+    }
+
+    let r_bytes = hex_to_32(hex::decode(&sig.r).unwrap());
+    let s_bytes = hex_to_32(hex::decode(&sig.s).unwrap());
+    let mut compact = [0u8; 64];
+    compact[..32].copy_from_slice(&r_bytes);
+    compact[32..].copy_from_slice(&s_bytes);
+    let rid = RecoveryId::from_i32((sig.recid & 0x03) as i32).expect("invalid recovery id");
+    // secp256k1 crate uses RecoverableSignature::from_compact
+    let rec_sig = RecoverableSignature::from_compact(&compact, rid).expect("bad signature bytes");
+    // Message must be 32 bytes (we already use a 32-byte hex string)
+    assert_eq!(message.len(), 32, "message must be 32 bytes");
+    let msg = Message::from_digest_slice(&message).unwrap();
+    let secp = Secp256k1::new();
+    let recovered = secp.recover_ecdsa(&msg, &rec_sig).expect("recover failed");
+
+    // Build original public key for comparison (uncompressed form 0x04 || X || Y)
+    let (orig_x_hex, orig_y_hex) = original_pubkey.clone();
+    let mut orig_ser = Vec::with_capacity(65);
+    orig_ser.push(0x04);
+    let x_bytes = hex::decode(&orig_x_hex).unwrap();
+    let y_bytes = hex::decode(&orig_y_hex).unwrap();
+    let x_bytes = hex_to_32(x_bytes);
+    let y_bytes = hex_to_32(y_bytes);
+    orig_ser.extend_from_slice(&x_bytes);
+    orig_ser.extend_from_slice(&y_bytes);
+    let original_pk = SecpPk::from_slice(&orig_ser).expect("invalid original pk bytes");
+    assert_eq!(recovered.serialize_uncompressed(), original_pk.serialize_uncompressed(), "Recovered public key does not match original");
+
+    
+
+
+
+    
+
+
+
+
 
 }
 
