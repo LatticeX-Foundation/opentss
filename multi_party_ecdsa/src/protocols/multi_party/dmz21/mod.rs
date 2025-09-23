@@ -17,6 +17,7 @@
 */
 pub mod common;
 pub mod keygen;
+pub mod reshare;
 pub mod local;
 pub mod message;
 pub mod sign;

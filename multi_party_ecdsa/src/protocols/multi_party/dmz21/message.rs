@@ -160,3 +160,30 @@ impl SignPhaseFiveStepFiveMsg {
 pub struct SignPhaseFiveStepSevenMsg {
     pub s_i: FE,
 }
+
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum MultiReshareMessage {
+    ReshareStartMessage(ReshareStartMessage),
+    ResharePhaseMsg(ResharePhaseMsg),
+    ReshareDLEQMsg(ReshareDLEQMsg),
+}
+
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReshareStartMessage {
+    pub new_party_ids: Vec<String>,
+    pub new_threshold: Option<usize>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResharePhaseMsg {
+    pub vss_scheme: Vss,
+    pub secret_share: FE,
+    pub public_signing_key: (String, String), // (x, y) coordinates as hex strings
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReshareDLEQMsg {
+     pub dl_proof: DLogProof<CU, sha2::Sha256>,
+}

@@ -28,4 +28,5 @@ pub enum SendingMessages {
     KeyGenSuccessWithResult(String),
     SignOfflineSuccessWithResult(String),
     SignOnlineSuccessWithResult(String),
+    ReshareKeySuccessWithResult(String),
 }

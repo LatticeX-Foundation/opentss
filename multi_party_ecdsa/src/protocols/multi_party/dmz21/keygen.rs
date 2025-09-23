@@ -132,10 +132,17 @@ impl KeyGenPhase {
         let dlog_com = DlogCommitment::new(&public_signing_key);
 
         // Generate phase four msg, vss
+        // NOTE: Shamir sharing with threshold t uses a polynomial of degree t-1. The previous
+        // implementation passed `t` directly as the degree to `share_at_indices`, which interprets
+        // its first argument as the polynomial degree (not the threshold). This caused an
+        // off-by-one when t==n (full participation), leading to inconsistent reshare behavior
+        // when a later reshare used the corrected degree. We subtract 1 here to ensure the
+        // original keygen uses the same convention as reshare.
+        let shamir_degree = if params.threshold == 0 { 0 } else { params.threshold - 1 };
         let share_private_key = KeyGenPhase::phase_four_generate_vss(
             &mut msgs,
             partyid.clone(),
-            params.threshold,
+            shamir_degree,
             params.share_count,
             private_signing_key.get_secret_key(),
             (*party_ids).clone(),
